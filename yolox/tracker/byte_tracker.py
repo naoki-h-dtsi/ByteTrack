@@ -1,5 +1,5 @@
 import numpy as np
-from collections import deque
+from collections import defaultdict, deque
 import os
 import os.path as osp
 import copy
@@ -12,7 +12,7 @@ from .basetrack import BaseTrack, TrackState
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    def __init__(self, tlwh, score):
+    def __init__(self, tlwh, score: float, ref_max: bool = False, fno: int = -1):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=float)
@@ -22,6 +22,9 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
+        self.highest_score = score if ref_max else 0.0
+        self.highest_score_fno = fno
+        self.ref_max = ref_max
 
     def predict(self):
         mean_state = self.mean.copy()
@@ -56,7 +59,7 @@ class STrack(BaseTrack):
         self.frame_id = frame_id
         self.start_frame = frame_id
 
-    def re_activate(self, new_track, frame_id, new_id=False):
+    def re_activate(self, new_track, frame_id, new_id=False, fno: int = -1):
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh)
         )
@@ -67,6 +70,9 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        if new_track.ref_max and self.highest_score < new_track.highest_score:
+            self.highest_score = new_track.highest_score
+            self.highest_score_fno = new_track.highest_score_fno
 
     def update(self, new_track, frame_id):
         """
@@ -84,6 +90,9 @@ class STrack(BaseTrack):
             self.mean, self.covariance, self.tlwh_to_xyah(new_tlwh))
         self.state = TrackState.Tracked
         self.is_activated = True
+        if new_track.ref_max and self.highest_score < new_track.highest_score:
+            self.highest_score = new_track.highest_score
+            self.highest_score_fno = new_track.highest_score_fno
 
         self.score = new_track.score
 
@@ -156,7 +165,8 @@ class BYTETracker(object):
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
 
-    def update(self, output_results, img_info, img_size):
+    def update(self, output_results, img_info, img_size, 
+               bools: np.typing.NDArray[np.int_] | None = None, fno: int = -1):
         self.frame_id += 1
         activated_starcks = []
         refind_stracks = []
@@ -169,7 +179,7 @@ class BYTETracker(object):
         else:
             output_results = output_results.cpu().numpy()
             scores = output_results[:, 4] * output_results[:, 5]
-            bboxes = output_results[:, :4]  # x1y1x2y2
+            bboxes = output_results[:, :4]  # x1y1x2y2     
         img_h, img_w = img_info[0], img_info[1]
         scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
         bboxes /= scale
@@ -184,10 +194,16 @@ class BYTETracker(object):
         scores_keep = scores[remain_inds]
         scores_second = scores[inds_second]
 
+        bools_keep = bools[remain_inds] if bools is not None else None
+
         if len(dets) > 0:
             '''Detections'''
-            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets, scores_keep)]
+            if bools_keep is not None:
+                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, ref_max, fno) for
+                            (tlbr, s, ref_max) in zip(dets, scores_keep, bools_keep)]
+            else:
+                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
+                            (tlbr, s) in zip(dets, scores_keep)]
         else:
             detections = []
 
@@ -210,7 +226,7 @@ class BYTETracker(object):
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
         for itracked, idet in matches:
-            track = strack_pool[itracked]
+            track: STrack = strack_pool[itracked]
             det = detections[idet]
             if track.state == TrackState.Tracked:
                 track.update(detections[idet], self.frame_id)
@@ -287,6 +303,9 @@ class BYTETracker(object):
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
         return output_stracks
+
+    def get_all_stracks(self) -> list[STrack]:
+        return self.tracked_stracks + self.lost_stracks + self.removed_stracks
 
 
 def joint_stracks(tlista, tlistb):
