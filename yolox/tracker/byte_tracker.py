@@ -1,3 +1,4 @@
+from typing import Self
 import numpy as np
 from collections import defaultdict, deque
 import os
@@ -12,7 +13,7 @@ from .basetrack import BaseTrack, TrackState
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    def __init__(self, tlwh, score: float, ref_max: bool = False, fno: int = -1):
+    def __init__(self, tlwh, score: np.float32, ref_max: bool = False, fno: int = -1):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=float)
@@ -22,7 +23,7 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
-        self.highest_score = score if ref_max else 0.0
+        self.highest_score = score if ref_max else np.float32(0.0)
         self.highest_score_fno = fno
         self.ref_max = ref_max
 
@@ -59,7 +60,7 @@ class STrack(BaseTrack):
         self.frame_id = frame_id
         self.start_frame = frame_id
 
-    def re_activate(self, new_track, frame_id, new_id=False, fno: int = -1):
+    def re_activate(self, new_track: Self, frame_id, new_id=False, fno: int = -1):
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh)
         )
@@ -70,11 +71,13 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+
+        self.ref_max = new_track.ref_max
         if new_track.ref_max and self.highest_score < new_track.highest_score:
             self.highest_score = new_track.highest_score
             self.highest_score_fno = new_track.highest_score_fno
 
-    def update(self, new_track, frame_id):
+    def update(self, new_track: Self, frame_id):
         """
         Update a matched track
         :type new_track: STrack
@@ -90,6 +93,7 @@ class STrack(BaseTrack):
             self.mean, self.covariance, self.tlwh_to_xyah(new_tlwh))
         self.state = TrackState.Tracked
         self.is_activated = True
+        self.ref_max = new_track.ref_max
         if new_track.ref_max and self.highest_score < new_track.highest_score:
             self.highest_score = new_track.highest_score
             self.highest_score_fno = new_track.highest_score_fno
@@ -166,7 +170,7 @@ class BYTETracker(object):
         self.kalman_filter = KalmanFilter()
 
     def update(self, output_results, img_info, img_size, 
-               bools: np.typing.NDArray[np.int_] | None = None, fno: int = -1):
+               bools: np.typing.NDArray[np.bool_] | None = None, fno: int = -1):
         self.frame_id += 1
         activated_starcks = []
         refind_stracks = []
@@ -185,7 +189,7 @@ class BYTETracker(object):
         bboxes /= scale
 
         remain_inds = scores > self.args.track_thresh
-        inds_low = scores > 0.1
+        inds_low = scores > self.args.rejection_thresh
         inds_high = scores < self.args.track_thresh
 
         inds_second = np.logical_and(inds_low, inds_high)
@@ -199,7 +203,7 @@ class BYTETracker(object):
         if len(dets) > 0:
             '''Detections'''
             if bools_keep is not None:
-                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, ref_max, fno) for
+                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, ref_max.item(), fno) for
                             (tlbr, s, ref_max) in zip(dets, scores_keep, bools_keep)]
             else:
                 detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
@@ -229,7 +233,7 @@ class BYTETracker(object):
             track: STrack = strack_pool[itracked]
             det = detections[idet]
             if track.state == TrackState.Tracked:
-                track.update(detections[idet], self.frame_id)
+                track.update(det, self.frame_id)
                 activated_starcks.append(track)
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
